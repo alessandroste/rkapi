@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.rkllm
+*.rknn
+*.so
+*.part
+build
+logs
+artifacts
+dist
+.env
+.env.*
+*.tar
+*.tar.gz

@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local configuration, weights, vendor binaries, and validation downloads
+.env
+.env.*
+!.env.example
+*.rkllm
+*.rknn
+*.so
+*.pyd
+*.part
+*.deb
+*.tar
+*.tar.gz
+logs/
+/artifacts/
