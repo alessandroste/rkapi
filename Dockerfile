@@ -41,6 +41,8 @@ ADD --checksum=sha256:c48e11a6f41b451a5fd1e4ad774ea60252d3d94f78bee9b21ea3d21b21
     ${SDK}/examples/multimodal_model_demo/deploy/3rdparty/librknnrt/Linux/librknn_api/include/rknn_api.h /sdk/include/rknn_api.h
 ADD --chmod=0644 --checksum=sha256:6a9e4fc5324c68921c3a900340361e107af7599fe34dc8fa7759b2c5ae22a6e6 \
     ${SDK}/rkllm-runtime/Linux/librkllm_api/aarch64/librkllmrt.so /out/librkllmrt.so
+ADD --chmod=0644 --checksum=sha256:d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8 \
+    ${SDK}/examples/multimodal_model_demo/deploy/3rdparty/librknnrt/Linux/librknn_api/aarch64/librknnrt.so /out/librknnrt.so
 COPY native/bindings.cpp native/bindings.cpp
 RUN g++ -std=c++17 -O2 -Wall -Wextra -Werror -shared -fPIC -fvisibility=hidden -pthread \
     $(python -m pybind11 --includes) -I/sdk/include native/bindings.cpp -ldl \
@@ -63,13 +65,13 @@ COPY --from=build /out/native-libs/ /usr/lib/aarch64-linux-gnu/
 COPY --from=build /out/native-licenses/ /usr/share/licenses/native-deps/
 COPY --from=build /out/models/ /models/
 COPY --from=dependencies /opt/venv /opt/venv
-COPY --from=build /out/librkllmrt.so /runtime/librkllmrt.so
+COPY --from=build /out/librkllmrt.so /out/librknnrt.so /runtime/
 COPY licenses/ /usr/share/licenses/rkllm-api/
 COPY app/ app/
 COPY --from=build /out/_native*.so app/
 COPY main.py LICENSE README.md ./
 USER 10001:10001
-RUN ["/opt/venv/bin/python", "-c", "import ctypes, hashlib; from pathlib import Path; pins={'qwen35.jinja':'273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80','gemma4.jinja':'0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5'}; assert all(hashlib.sha256((Path('app/templates')/name).read_bytes()).hexdigest()==digest for name,digest in pins.items()), 'Chat template checksum mismatch'; ctypes.CDLL('/runtime/librkllmrt.so'); import app._native; import main"]
+RUN ["/opt/venv/bin/python", "-c", "import ctypes, hashlib; from pathlib import Path; pins={'qwen35.jinja':'273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80','gemma4.jinja':'0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5'}; assert all(hashlib.sha256((Path('app/templates')/name).read_bytes()).hexdigest()==digest for name,digest in pins.items()), 'Chat template checksum mismatch'; ctypes.CDLL('/runtime/librkllmrt.so'); ctypes.CDLL('/runtime/librknnrt.so'); import app._native; import main"]
 EXPOSE 8001
 STOPSIGNAL SIGTERM
 ENTRYPOINT []

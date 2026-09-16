@@ -39,7 +39,7 @@ MODEL_PATH=/models/model.rkllm
 VISION_MODEL_PATH=/models/vision.rknn
 ```
 
-Vision requires a matching language model, encoder and RKNN runtime. Gemma4's
+Vision requires a matching language model and encoder. Gemma4's
 RKLLM export is text-only. Gemma E4B and larger variants have no built-in profile.
 
 For other compatible models, use `MODEL_PROFILE=generic`, set `MODEL_NAME` and
@@ -80,10 +80,7 @@ docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   -p 127.0.0.1:8001:8001 rkllm-api:local
 ```
 
-For Qwen vision, add `-e VISION_MODEL_PATH=/models/vision.rknn` and mount the
-matching [RKNN runtime](https://github.com/airockchip/rknn-llm/tree/release-v1.3.0/examples/multimodal_model_demo/deploy/3rdparty/librknnrt/Linux/librknn_api/aarch64)
-file read-only at `/runtime/librknnrt.so`. Do not mount an entire directory over
-`/runtime`. Text-only mode does not require this extra runtime.
+For Qwen vision, add `-e VISION_MODEL_PATH=/models/vision.rknn`.
 
 ## API and configuration
 
@@ -128,4 +125,4 @@ private network; the example binds to loopback only.
 | --- | --- | --- |
 | Qwen template | [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-2B), Copyright 2026 Alibaba Cloud | [Apache-2.0](licenses/Apache-2.0) |
 | Gemma template | [Gemma 4](https://huggingface.co/google/gemma-4-E2B-it), Google Gemma Engineering Team | [Apache-2.0](licenses/Apache-2.0) |
-| Rockchip runtime | [RKLLM](https://github.com/airockchip/rknn-llm), including ggml/llama.cpp notices | [Redistribution terms](licenses/Rockchip-LICENSE) |
+| Rockchip runtimes | [RKLLM and RKNN](https://github.com/airockchip/rknn-llm), including ggml/llama.cpp notices | [Redistribution terms](licenses/Rockchip-LICENSE) |
