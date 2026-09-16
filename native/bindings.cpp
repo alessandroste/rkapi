@@ -162,7 +162,7 @@ public:
           abort_(library_.get<decltype(abort_)>("rkllm_abort")),
           running_(library_.get<decltype(running_)>("rkllm_is_running")) {
         text_argument(model_path_, "Model path");
-        if (context_len < 1 || context_len > 4096 || max_new_tokens < 1 ||
+        if (context_len < 1 || context_len > 16384 || max_new_tokens < 1 ||
             max_new_tokens > context_len || queue_bytes == 0 || queue_bytes > 1024 * 1024) {
             throw std::invalid_argument("Invalid context, token limit or native queue capacity");
         }

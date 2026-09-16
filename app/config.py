@@ -53,8 +53,8 @@ class Settings(BaseSettings):
     RKLLM_LIB_PATH: str = "/runtime/librkllmrt.so"
     VISION_MODEL_PATH: str | None = None
     RKNN_LIB_PATH: str = "/runtime/librknnrt.so"
-    MAX_CONTEXT_LEN: int = Field(4096, ge=128, le=4096)
-    MAX_NEW_TOKENS: int = Field(256, ge=1, le=4096)
+    MAX_CONTEXT_LEN: int = Field(4096, ge=128, le=16384)
+    MAX_NEW_TOKENS: int = Field(256, ge=1, le=16384)
     IGNORE_EOS_TOKEN: bool = False
     TEMPERATURE: float = Field(0.6, ge=0, le=2, allow_inf_nan=False)
     TOP_P: float = Field(0.95, gt=0, le=1, allow_inf_nan=False)

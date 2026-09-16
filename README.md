@@ -107,9 +107,15 @@ Use the model name returned by `/v1/models`.
 - Reasoning and final content share the token limit; allow 1024-2048 tokens for thinking.
 - Unsupported: remote image URLs, animation, video, strict tool decoding,
   logprobs, seed, LoRA and `n > 1`.
+  Unknown fields, including top-level `seed`, are rejected.
 
 Qwen defaults: `MAX_CONTEXT_LEN=4096`, `MAX_NEW_TOKENS=256`, `TEMPERATURE=0.6`,
 `TOP_P=0.95`, `TOP_K=20`, `QUEUE_DEPTH=2`.
+`MAX_CONTEXT_LEN`, `MAX_NEW_TOKENS`, and request `max_tokens` /
+`max_completion_tokens` accept values up to 16384. Output limits must not exceed
+the configured context; the prompt and generated output share that window.
+Contexts above 4096 require a compatible larger-context RKLLM export: increasing
+these settings does not extend a model compiled for 4096 tokens.
 See [configuration](app/config.py) for all options. Environment variables override
 an optional YAML file selected by `CONFIG_FILE`.
 

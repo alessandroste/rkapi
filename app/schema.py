@@ -139,13 +139,14 @@ class ChatCompletionRequest(StrictModel):
     model: str
     messages: list[ChatMessage] = Field(min_length=1, max_length=256)
     stream: bool = False
+    params: dict[str, Any] | None = None
     stream_options: StreamOptions | None = None
     n: Literal[1] = 1
-    tools: list[ToolDefinition] | None = Field(None, max_length=32)
+    tools: list[ToolDefinition] | None = Field(None, max_length=64)
     tool_choice: Literal["auto", "none", "required"] | NamedToolChoice = "auto"
     parallel_tool_calls: bool = True
-    max_tokens: int | None = Field(None, ge=1, le=4096)
-    max_completion_tokens: int | None = Field(None, ge=1, le=4096)
+    max_tokens: int | None = Field(None, ge=1, le=16384)
+    max_completion_tokens: int | None = Field(None, ge=1, le=16384)
     temperature: float | None = Field(None, ge=0, le=2)
     top_p: float | None = Field(None, gt=0, le=1)
     top_k: int | None = Field(None, ge=1)
