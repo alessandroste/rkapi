@@ -108,6 +108,8 @@ tool definitions, tool choice, thinking mode and image. A mismatch, failed or
 unfinished response, cancellation, output limit or context-budget exhaustion
 forces a fresh prefill. Only one conversation is resident; there is no disk
 cache or multi-session cache.
+For tool-call-only assistant messages, `content: null` and `content: ""` are
+equivalent for cache matching; reasoning and tool-call details must still match.
 Continuations that cannot render without earlier template history also fall
 back to the complete submitted prompt.
 

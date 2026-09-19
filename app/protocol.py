@@ -70,6 +70,8 @@ def _render(config, messages, tools, thinking, add_generation_prompt=True):
 
 def normalized_message(message):
     data = message.model_dump(mode="json")
+    if data["role"] == "assistant" and data["tool_calls"] and data["content"] == "":
+        data["content"] = None
     for call in data["tool_calls"] or []:
         call["function"]["arguments"] = json.loads(call["function"]["arguments"])
     return data
