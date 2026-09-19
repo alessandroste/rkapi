@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     RKLLM_LIB_PATH: str = "/runtime/librkllmrt.so"
     VISION_MODEL_PATH: str | None = None
     RKNN_LIB_PATH: str = "/runtime/librknnrt.so"
+    EMBED_FLASH: bool = False
+    KV_CACHE_MODE: Literal["off", "prefix", "stateful"] = "off"
+    TOKENIZER_PATH: str | None = None
     MAX_CONTEXT_LEN: int = Field(4096, ge=128, le=16384)
     MAX_NEW_TOKENS: int = Field(256, ge=1, le=16384)
     IGNORE_EOS_TOKEN: bool = False
@@ -78,7 +81,7 @@ class Settings(BaseSettings):
     def eos_token_ids(self):
         if self.EOS_TOKEN_IDS is not None:
             return self.EOS_TOKEN_IDS
-        return {"qwen35": [248044], "gemma4": [1, 106, 50], "generic": []}[self.MODEL_PROTOCOL]
+        return {"qwen35": [248044, 248046], "gemma4": [1, 106, 50], "generic": []}[self.MODEL_PROTOCOL]
 
     @property
     def vision_embedding_size(self):
@@ -112,6 +115,16 @@ class Settings(BaseSettings):
             self.VISION_MODEL_PATH = None
         if self.CHAT_TEMPLATE_PATH == "":
             self.CHAT_TEMPLATE_PATH = None
+        if self.KV_CACHE_MODE != "off":
+            expected = {"prefix": "gemma4", "stateful": "qwen35"}[self.KV_CACHE_MODE]
+            if self.MODEL_PROTOCOL != expected:
+                raise ValueError(f"KV_CACHE_MODE={self.KV_CACHE_MODE} requires {expected}")
+            if not self.TOKENIZER_PATH:
+                raise ValueError("KV reuse requires the export's matching TOKENIZER_PATH")
+            if self.IGNORE_EOS_TOKEN:
+                raise ValueError("KV reuse requires IGNORE_EOS_TOKEN=false")
+            if self.KV_CACHE_MODE == "stateful" and self.CHAT_TEMPLATE_PATH:
+                raise ValueError("Stateful KV reuse requires the built-in Qwen3.5 template")
         if self.MODEL_PROTOCOL == "generic":
             if not self.CHAT_TEMPLATE_PATH:
                 raise ValueError("Generic models require CHAT_TEMPLATE_PATH")

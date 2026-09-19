@@ -82,6 +82,55 @@ docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
 
 For Qwen vision, add `-e VISION_MODEL_PATH=/models/vision.rknn`.
 
+Set `EMBED_FLASH=true` to read the model's embedding table from storage instead
+of keeping it in RAM. This defaults to false; use fast local storage and measure
+the memory/latency trade-off for your export.
+
+### Optional KV reuse
+
+Mount the matching original model's `tokenizer.json` read-only and set
+`TOKENIZER_PATH=/models/tokenizer.json`. No tokenizer or model is downloaded at
+runtime. Text requests use explicit tokenizer IDs and exact budget checks.
+RKLLM tokenizes vision prompts internally, so admission conservatively budgets
+UTF-8 text bytes plus image tokens; reported usage uses RKLLM's actual count.
+Large vision prompts can therefore be rejected even when their tokenized form
+would fit. This avoids silently overflowing the context.
+
+| `KV_CACHE_MODE` | Behavior |
+| --- | --- |
+| `off` (default) | Clear native state for each request. |
+| `prefix` | Gemma4 only: submit complete prompts and reuse matching prefixes when new input remains. Identical/shortened prompts reset to avoid stale zero-prefill results. |
+| `stateful` | Built-in Qwen3.5 template only: append to the last verified conversation, including tools, thinking and same-image follow-ups. |
+
+Clients still send complete message history. Stateful hits require unchanged
+prior messages, assistant output (including `reasoning_content` and tool calls),
+tool definitions, tool choice, thinking mode and image. A mismatch, failed or
+unfinished response, cancellation, output limit or context-budget exhaustion
+forces a fresh prefill. Only one conversation is resident; there is no disk
+cache or multi-session cache.
+Continuations that cannot render without earlier template history also fall
+back to the complete submitted prompt.
+
+Stateful reuse retains earlier reasoning in native memory, unlike a fresh
+Qwen prompt which can omit older reasoning. This opt-in mode can therefore
+change answers and consume more context. If retained state no longer fits,
+the server resets and uses the complete submitted history. Custom templates
+and `IGNORE_EOS_TOKEN=true` are not supported with stateful reuse.
+
+For Gemma4, start with `EMBED_FLASH=true` and `KV_CACHE_MODE=prefix`.
+The tested Gemma export is still limited to 4096 tokens. Qwen 16K operation
+requires a 16K-compatible export; neither setting extends a compiled model.
+
+Example for Qwen4B text with a compatible export:
+
+```text
+MODEL_PROFILE=qwen3.5-4b
+MAX_CONTEXT_LEN=16384
+EMBED_FLASH=true
+KV_CACHE_MODE=stateful
+TOKENIZER_PATH=/models/tokenizer.json
+```
+
 ## API and configuration
 
 | Endpoint | Purpose |

@@ -80,6 +80,7 @@ struct Output {
     bool finished = false;
     bool has_perf = false;
     bool saw_eos = false;
+    bool after_eos = false;
     std::vector<int32_t> eos_token_ids;
     int generated_tokens = 0;
     RKLLMPerfStat perf{};
@@ -101,6 +102,7 @@ int result_callback(RKLLMResult* result, void* userdata, LLMCallState state) noe
                 ) != output.eos_token_ids.end();
             }
         } else if (state == RKLLM_RUN_NORMAL && result) {
+            output.after_eos = output.after_eos || output.saw_eos;
             ++output.generated_tokens;
             output.saw_eos = output.saw_eos || std::find(
                 output.eos_token_ids.begin(), output.eos_token_ids.end(), result->token_id
@@ -144,15 +146,18 @@ class LLM : public std::enable_shared_from_this<LLM> {
     std::size_t queue_bytes_;
     std::vector<int32_t> eos_token_ids_;
     int image_embedding_size_;
+    bool cache_valid_ = false;
     decltype(&rkllm_destroy) destroy_;
     decltype(&rkllm_clear_kv_cache) clear_;
     decltype(&rkllm_run) run_;
     decltype(&rkllm_abort) abort_;
     decltype(&rkllm_is_running) running_;
+    decltype(&rkllm_get_kv_cache_size) cache_size_;
 public:
     LLM(const std::string& library_path, const std::string& model_path,
         int context_len, int max_new_tokens, bool ignore_eos, std::size_t queue_bytes,
-        std::vector<int32_t> eos_token_ids, bool skip_special_tokens, int image_embedding_size)
+        std::vector<int32_t> eos_token_ids, bool skip_special_tokens, int image_embedding_size,
+        bool embed_flash)
         : library_(library_path), model_path_(model_path), queue_bytes_(queue_bytes),
           eos_token_ids_(std::move(eos_token_ids)),
           image_embedding_size_(image_embedding_size),
@@ -160,7 +165,8 @@ public:
           clear_(library_.get<decltype(clear_)>("rkllm_clear_kv_cache")),
           run_(library_.get<decltype(run_)>("rkllm_run")),
           abort_(library_.get<decltype(abort_)>("rkllm_abort")),
-          running_(library_.get<decltype(running_)>("rkllm_is_running")) {
+          running_(library_.get<decltype(running_)>("rkllm_is_running")),
+          cache_size_(library_.get<decltype(cache_size_)>("rkllm_get_kv_cache_size")) {
         text_argument(model_path_, "Model path");
         if (context_len < 1 || context_len > 16384 || max_new_tokens < 1 ||
             max_new_tokens > context_len || queue_bytes == 0 || queue_bytes > 1024 * 1024) {
@@ -192,6 +198,7 @@ public:
         params_.is_async = false;
         params_.extend_param.n_batch = 1;
         params_.extend_param.base_domain_id = 1;
+        params_.extend_param.embed_flash = embed_flash;
         callbacks_.result_callback = result_callback;
         callbacks_.result_userdata = &initialization_output_;
         try {
@@ -220,7 +227,8 @@ public:
     std::shared_ptr<Generation> request(
         const std::string& prompt, int max_tokens, float temperature, float top_p,
         int top_k, float repeat_penalty, float frequency_penalty, float presence_penalty,
-        const py::object& image, int width, int height);
+        const py::object& image, int width, int height,
+        bool keep_history, bool reuse_cache, int input_token_count, std::vector<int32_t> input_ids);
     LLMHandle begin(const std::shared_ptr<Generation>& generation) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (closing_ || !handle_) {
@@ -250,6 +258,13 @@ class Generation : public std::enable_shared_from_this<Generation> {
     int height_ = 0;
     RKLLMSamplingParam sampling_{};
     int max_tokens_;
+    bool keep_history_;
+    bool reuse_cache_;
+    int input_token_count_;
+    std::vector<int32_t> input_ids_;
+    int prompt_tokens_ = -1;
+    int cache_tokens_ = 0;
+    bool cache_valid_ = false;
     Output output_;
     std::atomic<bool> started_{false};
 
@@ -262,14 +277,39 @@ class Generation : public std::enable_shared_from_this<Generation> {
         }
         const auto handle = model_->begin(shared_from_this());
         try {
-            check(model_->clear_(handle, 0, nullptr, nullptr), "rkllm_clear_kv_cache");
+            if (reuse_cache_ && !model_->cache_valid_) {
+                throw std::runtime_error("Native cache is not reusable");
+            }
+            model_->cache_valid_ = false;
+            if (!reuse_cache_) {
+                check(model_->clear_(handle, 0, nullptr, nullptr), "rkllm_clear_kv_cache");
+            }
+            if (input_token_count_ >= 0) {
+                int retained = 0;
+                if (keep_history_ && reuse_cache_) {
+                    check(model_->cache_size_(handle, &retained), "rkllm_get_kv_cache_size");
+                }
+                if (retained < 0 || retained > model_->context_len()) {
+                    throw std::runtime_error("Invalid native cache size");
+                }
+                prompt_tokens_ = retained + input_token_count_;
+                if (prompt_tokens_ + max_tokens_ > model_->context_len()) {
+                    throw std::invalid_argument("Prompt and output allowance exceed configured context");
+                }
+            }
             if (!output_.cancelled.load()) {
                 RKLLMInput input{};
                 input.role = "user";
                 input.enable_thinking = false;
                 input.input_type = image_.empty() ? RKLLM_INPUT_PROMPT : RKLLM_INPUT_MULTIMODAL;
                 if (image_.empty()) {
-                    input.prompt_input = prompt_.c_str();
+                    if (input_ids_.empty()) {
+                        input.prompt_input = prompt_.c_str();
+                    } else {
+                        input.input_type = RKLLM_INPUT_TOKEN;
+                        input.token_input.input_ids = input_ids_.data();
+                        input.token_input.n_tokens = input_ids_.size();
+                    }
                 } else {
                     input.multimodal_input.prompt = prompt_.data();
                     auto& image = input.multimodal_input.image;
@@ -284,7 +324,7 @@ class Generation : public std::enable_shared_from_this<Generation> {
                 }
                 RKLLMInferParam inference{};
                 inference.mode = RKLLM_INFER_GENERATE;
-                inference.keep_history = 0;
+                inference.keep_history = keep_history_;
                 inference.max_new_tokens = max_tokens_;
                 inference.sampling_params = &sampling_;
                 std::atomic<bool> complete{false};
@@ -331,8 +371,26 @@ class Generation : public std::enable_shared_from_this<Generation> {
                 if (!output_.cancelled.load() && (!output_.finished || !output_.has_perf)) {
                     throw std::runtime_error("RKLLM did not deliver a finish callback with performance data");
                 }
+                if (!output_.cancelled.load() && input_token_count_ >= 0 && !image_.empty()) {
+                    if (output_.perf.prefill_tokens < 0 || output_.perf.prefill_tokens > input_token_count_) {
+                        throw std::runtime_error("RKLLM exceeded the multimodal input budget");
+                    }
+                    prompt_tokens_ = output_.perf.prefill_tokens;
+                } else if (!output_.cancelled.load() && input_token_count_ >= 0 &&
+                    (!reuse_cache_ || keep_history_) &&
+                    output_.perf.prefill_tokens != input_token_count_) {
+                    throw std::runtime_error("TOKENIZER_PATH does not match RKLLM's input token count");
+                }
+                if (input_token_count_ >= 0) {
+                    check(model_->cache_size_(handle, &cache_tokens_), "rkllm_get_kv_cache_size");
+                }
+                cache_valid_ = output_.finished && output_.has_perf && output_.saw_eos &&
+                    !output_.cancelled.load() && !output_.after_eos &&
+                    cache_tokens_ >= 0 && cache_tokens_ < model_->context_len();
+                model_->cache_valid_ = cache_valid_;
             }
         } catch (...) {
+            model_->cache_valid_ = false;
             model_->end();
             throw;
         }
@@ -341,10 +399,13 @@ class Generation : public std::enable_shared_from_this<Generation> {
 public:
     Generation(std::shared_ptr<LLM> model, std::string prompt, int max_tokens,
                RKLLMSamplingParam sampling, std::vector<float> image,
-               std::size_t image_tokens, int width, int height)
+               std::size_t image_tokens, int width, int height,
+               bool keep_history, bool reuse_cache, int input_token_count, std::vector<int32_t> input_ids)
         : model_(std::move(model)), prompt_(std::move(prompt)), image_(std::move(image)),
           image_tokens_(image_tokens), width_(width), height_(height),
-          sampling_(sampling), max_tokens_(max_tokens) {
+          sampling_(sampling), max_tokens_(max_tokens), keep_history_(keep_history),
+          reuse_cache_(reuse_cache), input_token_count_(input_token_count),
+          input_ids_(std::move(input_ids)) {
         output_.limit = model_->queue_bytes();
         output_.eos_token_ids = model_->eos_token_ids_;
     }
@@ -371,8 +432,13 @@ public:
         }
         std::lock_guard<std::mutex> lock(output_.mutex);
         py::dict result;
-        result["prompt_tokens"] = output_.has_perf ? output_.perf.prefill_tokens : -1;
-        result["completion_tokens"] = output_.has_perf ? output_.perf.generate_tokens : -1;
+        result["prompt_tokens"] = prompt_tokens_ >= 0 ? prompt_tokens_ :
+            (output_.has_perf ? output_.perf.prefill_tokens : -1);
+        result["completion_tokens"] = input_token_count_ >= 0 ? output_.generated_tokens :
+            (output_.has_perf ? output_.perf.generate_tokens : -1);
+        result["prefill_tokens"] = output_.has_perf ? output_.perf.prefill_tokens : -1;
+        result["cache_tokens"] = cache_tokens_;
+        result["cache_valid"] = cache_valid_;
         result["prefill_ms"] = output_.perf.prefill_time_ms;
         result["generate_ms"] = output_.perf.generate_time_ms;
         result["memory_mb"] = output_.perf.memory_usage_mb;
@@ -399,7 +465,8 @@ void LLM::close() {
 std::shared_ptr<Generation> LLM::request(
     const std::string& prompt, int max_tokens, float temperature, float top_p, int top_k,
     float repeat_penalty, float frequency_penalty, float presence_penalty,
-    const py::object& image, int width, int height) {
+    const py::object& image, int width, int height,
+    bool keep_history, bool reuse_cache, int input_token_count, std::vector<int32_t> input_ids) {
     text_argument(prompt, "Prompt");
     if (prompt.size() > 8 * 1024 * 1024 || max_tokens < 1 || max_tokens > context_len() ||
         top_k < 1 ||
@@ -409,6 +476,15 @@ std::shared_ptr<Generation> LLM::request(
         !std::isfinite(frequency_penalty) || std::abs(frequency_penalty) > 2 ||
         !std::isfinite(presence_penalty) || std::abs(presence_penalty) > 2) {
         throw std::invalid_argument("Invalid request sampling parameters or prompt size");
+    }
+    if (input_token_count < -1 || input_token_count == 0 || input_token_count > context_len() ||
+        ((keep_history || reuse_cache) && input_token_count < 1)) {
+        throw std::invalid_argument("KV reuse requires a valid input token count");
+    }
+    if (!input_ids.empty() && (!image.is_none() ||
+        input_ids.size() != static_cast<std::size_t>(input_token_count) ||
+        std::any_of(input_ids.begin(), input_ids.end(), [](int32_t id) { return id < 0; }))) {
+        throw std::invalid_argument("Input token IDs must match the text prompt's token count");
     }
     std::vector<float> pixels;
     std::size_t image_tokens = 0;
@@ -448,7 +524,7 @@ std::shared_ptr<Generation> LLM::request(
     };
     return std::make_shared<Generation>(
         shared_from_this(), prompt, max_tokens, sampling, std::move(pixels),
-        image_tokens, width, height);
+        image_tokens, width, height, keep_history, reuse_cache, input_token_count, std::move(input_ids));
 }
 
 class Vision {
@@ -631,22 +707,24 @@ PYBIND11_MODULE(_native, module) {
         .def(py::init([](const std::string& library, const std::string& model,
                          int context, int tokens, bool ignore_eos, std::size_t queue_bytes,
                          std::vector<int32_t> eos_token_ids, bool skip_special_tokens,
-                         int image_embedding_size) {
+                         int image_embedding_size, bool embed_flash) {
             py::gil_scoped_release release;
             return std::make_shared<LLM>(
                 library, model, context, tokens, ignore_eos, queue_bytes,
-                std::move(eos_token_ids), skip_special_tokens, image_embedding_size);
+                std::move(eos_token_ids), skip_special_tokens, image_embedding_size, embed_flash);
         }), py::arg("library_path"), py::arg("model_path"), py::arg("context_len") = 4096,
             py::arg("max_new_tokens") = 256, py::arg("ignore_eos") = false,
             py::arg("queue_bytes") = 65536,
             py::arg("eos_token_ids") = std::vector<int32_t>{},
             py::arg("skip_special_tokens") = false,
-            py::arg("image_embedding_size") = 2048)
+            py::arg("image_embedding_size") = 2048, py::arg("embed_flash") = false)
         .def("request", &LLM::request, py::arg("prompt"), py::arg("max_tokens") = 256,
              py::arg("temperature") = 0.6F, py::arg("top_p") = 0.95F, py::arg("top_k") = 20,
              py::arg("repeat_penalty") = 1.1F, py::arg("frequency_penalty") = 0.0F,
              py::arg("presence_penalty") = 0.0F, py::arg("image") = py::none(),
-             py::arg("width") = 0, py::arg("height") = 0)
+             py::arg("width") = 0, py::arg("height") = 0,
+             py::arg("keep_history") = false, py::arg("reuse_cache") = false,
+             py::arg("input_token_count") = -1, py::arg("input_ids") = std::vector<int32_t>{})
         .def("close", &LLM::close, py::call_guard<py::gil_scoped_release>());
     py::class_<Vision>(module, "Vision")
         .def(py::init([](const std::string& library, const std::string& model, int embedding_size) {

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache, partial
 import json
+import logging
 from pathlib import Path
 import re
 import uuid
@@ -13,7 +14,9 @@ import uuid
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError
 
 from app.config import Settings
-from app.schema import ChatCompletionRequest, NamedToolChoice
+from app.schema import ChatCompletionRequest, ChatMessage, NamedToolChoice
+
+logger = logging.getLogger(__name__)
 
 
 class OutputError(RuntimeError):
@@ -49,10 +52,10 @@ def chat_template(template_path=None, protocol="qwen35"):
         raise ValueError(f"Invalid chat template {path}: {error}") from error
 
 
-def _render(config, messages, tools, thinking):
+def _render(config, messages, tools, thinking, add_generation_prompt=True):
     try:
         prompt = chat_template(config.CHAT_TEMPLATE_PATH, config.MODEL_PROTOCOL).render(
-            messages=messages, tools=tools, add_generation_prompt=True,
+            messages=messages, tools=tools, add_generation_prompt=add_generation_prompt,
             enable_thinking=thinking, add_vision_id=False,
             bos_token=config.BOS_TOKEN, eos_token=config.EOS_TOKEN,
         )
@@ -60,7 +63,16 @@ def _render(config, messages, tools, thinking):
         raise ValueError(f"Chat template could not render these messages: {error}") from error
     if not prompt.strip() or "\0" in prompt:
         raise ValueError("Chat template must produce a non-empty prompt without NUL characters")
+    if config.MODEL_PROTOCOL == "qwen35":
+        prompt = prompt.replace("<|vision_start|><|image_pad|><|vision_end|>", "<image>")
     return prompt
+
+
+def normalized_message(message):
+    data = message.model_dump(mode="json")
+    for call in data["tool_calls"] or []:
+        call["function"]["arguments"] = json.loads(call["function"]["arguments"])
+    return data
 
 
 @dataclass
@@ -68,11 +80,40 @@ class PreparedPrompt:
     prompt: str
     image: bytes | None
     tools: dict
+    history: list | None = None
+    tool_data: list | None = None
+
+
+def continuation_prompt(previous, response, current, config):
+    """Only append to the last verified conversation, including assistant/tool history."""
+    old, new = previous.prepared, current.prepared
+    if (old.history is None or new.history is None
+            or previous.request.thinks != current.request.thinks
+            or json.dumps(old.tool_data, sort_keys=True) != json.dumps(new.tool_data, sort_keys=True)
+            or old.image != new.image
+            or previous.request.tool_choice != current.request.tool_choice
+            or previous.request.parallel_tool_calls != current.request.parallel_tool_calls):
+        return None
+    expected = old.history + [normalized_message(ChatMessage.model_validate(response))]
+    if json.dumps(new.history[:len(expected)], sort_keys=True) != json.dumps(expected, sort_keys=True):
+        return None
+    added = new.history[len(expected):]
+    if len(added) == 1 and added[0]["role"] == "user":
+        try:
+            return _render(config, added, [], current.request.thinks)
+        except ValueError as error:
+            logger.info("KV reset: continuation needs full template history: %s", error)
+            return None
+    if added and all(message["role"] == "tool" for message in added):
+        prefix = _render(config, expected, new.tool_data, current.request.thinks, False)
+        if new.prompt.startswith(prefix):
+            return new.prompt[len(prefix):]
+    return None
 
 
 def prepare_prompt(request: ChatCompletionRequest, config: Settings, vision_enabled):
     """Copy history, associate tool results by ID, and adapt just the image marker."""
-    messages = [message.model_dump(mode="json") for message in request.messages]
+    messages = [normalized_message(message) for message in request.messages]
     if config.MODEL_PROTOCOL != "qwen35":
         if request.tools or request.tool_choice not in ("auto", "none"):
             raise ValueError("Tool calling currently requires the qwen35 protocol")
@@ -136,7 +177,6 @@ def prepare_prompt(request: ChatCompletionRequest, config: Settings, vision_enab
             if call["id"] in seen_ids:
                 raise ValueError("Duplicate tool_call_id in history")
             seen_ids.add(call["id"])
-            call["function"]["arguments"] = json.loads(call["function"]["arguments"])
         history.append(message)
         index += 1
         if calls:
@@ -168,11 +208,10 @@ def prepare_prompt(request: ChatCompletionRequest, config: Settings, vision_enab
         history.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
     tool_data = [tool.model_dump(exclude_none=True) for tool in tools]
     prompt = _render(config, history, tool_data, request.thinks)
-    prompt = prompt.replace("<|vision_start|><|image_pad|><|vision_end|>", "<image>")
     if prompt.count("<image>") != (1 if image is not None else 0):
         raise ValueError("Literal <image> markers are reserved for image content parts")
     return PreparedPrompt(
-        prompt, image, {tool.function.name: tool.function for tool in tools}
+        prompt, image, {tool.function.name: tool.function for tool in tools}, history, tool_data
     )
 
 
@@ -348,6 +387,8 @@ class OutputParser:
     def finish(self, request):
         if self.state == "tool":
             raise OutputError("Generation ended inside a tool call; increase the token limit")
+        if len(self.calls) > 16:
+            raise OutputError("Model emitted more than 16 tool calls")
         events = []
         self._emit(self.pending, events)
         self.pending = ""
