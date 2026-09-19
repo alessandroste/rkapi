@@ -149,6 +149,7 @@ Use the model name returned by `/v1/models`.
 
 - All profiles: streaming, sampling, penalties, stop sequences and cancellation.
 - Qwen profiles: tools, separate reasoning and one base64 PNG/JPEG/WebP image.
+- Tool-call history accepts an optional non-negative integer `index`; this transport metadata is excluded from prompts and cache matching.
 - One active request; two waiting by default. A full queue returns 429.
 - Reasoning and final content share the token limit; allow 1024-2048 tokens for thinking.
 - Unsupported: remote image URLs, animation, video, strict tool decoding,

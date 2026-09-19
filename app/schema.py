@@ -54,6 +54,7 @@ class ToolCall(StrictModel):
     id: str = Field(min_length=1, max_length=128)
     type: Literal["function"] = "function"
     function: FunctionCall
+    index: int | None = Field(None, ge=0, strict=True, exclude=True)
 
 
 class ChatMessage(StrictModel):
